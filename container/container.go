@@ -2,20 +2,23 @@ package container
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
-	"github.com/samalba/dockerclient"
+	"github.com/docker/docker/api/types"
+	dockercontainer "github.com/docker/docker/api/types/container"
 )
 
 const (
 	watchtowerLabel = "com.centurylinklabs.watchtower"
 	signalLabel     = "com.centurylinklabs.watchtower.stop-signal"
+	enableLabel     = "com.centurylinklabs.watchtower.enable"
 	zodiacLabel     = "com.centurylinklabs.zodiac.original-image"
 )
 
 // NewContainer returns a new Container instance instantiated with the
 // specified ContainerInfo and ImageInfo structs.
-func NewContainer(containerInfo *dockerclient.ContainerInfo, imageInfo *dockerclient.ImageInfo) *Container {
+func NewContainer(containerInfo *types.ContainerJSON, imageInfo *types.ImageInspect) *Container {
 	return &Container{
 		containerInfo: containerInfo,
 		imageInfo:     imageInfo,
@@ -26,13 +29,13 @@ func NewContainer(containerInfo *dockerclient.ContainerInfo, imageInfo *dockercl
 type Container struct {
 	Stale bool
 
-	containerInfo *dockerclient.ContainerInfo
-	imageInfo     *dockerclient.ImageInfo
+	containerInfo *types.ContainerJSON
+	imageInfo     *types.ImageInspect
 }
 
 // ID returns the Docker container ID.
 func (c Container) ID() string {
-	return c.containerInfo.Id
+	return c.containerInfo.ID
 }
 
 // Name returns the Docker container name.
@@ -43,7 +46,7 @@ func (c Container) Name() string {
 // ImageID returns the ID of the Docker image that was used to start the
 // container.
 func (c Container) ImageID() string {
-	return c.imageInfo.Id
+	return c.imageInfo.ID
 }
 
 // ImageName returns the name of the Docker image that was used to start the
@@ -61,6 +64,22 @@ func (c Container) ImageName() string {
 	}
 
 	return imageName
+}
+
+// Enabled returns the value of the container enabled label and if the label
+// was set.
+func (c Container) Enabled() (bool, bool) {
+	rawBool, ok := c.containerInfo.Config.Labels[enableLabel]
+	if !ok {
+		return false, false
+	}
+
+	parsedBool, err := strconv.ParseBool(rawBool)
+	if err != nil {
+		return false, false
+	}
+
+	return parsedBool, true
 }
 
 // Links returns a list containing the names of all the containers to which
@@ -109,7 +128,7 @@ func (c Container) StopSignal() string {
 // running container with the ContainerConfig from the image that container was
 // started from. This function returns a ContainerConfig which contains just
 // the options overridden at runtime.
-func (c Container) runtimeConfig() *dockerclient.ContainerConfig {
+func (c Container) runtimeConfig() *dockercontainer.Config {
 	config := c.containerInfo.Config
 	imageConfig := c.imageInfo.Config
 
@@ -135,7 +154,12 @@ func (c Container) runtimeConfig() *dockerclient.ContainerConfig {
 
 	config.Volumes = structMapSubtract(config.Volumes, imageConfig.Volumes)
 
-	config.ExposedPorts = structMapSubtract(config.ExposedPorts, imageConfig.ExposedPorts)
+	// subtract ports exposed in image from container
+	for k := range config.ExposedPorts {
+		if _, ok := imageConfig.ExposedPorts[k]; ok {
+			delete(config.ExposedPorts, k)
+		}
+	}
 	for p := range c.containerInfo.HostConfig.PortBindings {
 		config.ExposedPorts[p] = struct{}{}
 	}
@@ -146,7 +170,7 @@ func (c Container) runtimeConfig() *dockerclient.ContainerConfig {
 
 // Any links in the HostConfig need to be re-written before they can be
 // re-submitted to the Docker create API.
-func (c Container) hostConfig() *dockerclient.HostConfig {
+func (c Container) hostConfig() *dockercontainer.HostConfig {
 	hostConfig := c.containerInfo.HostConfig
 
 	for i, link := range hostConfig.Links {
